@@ -16,13 +16,31 @@ This repository holds only elDrive and the kit it needs (runtime, build, GPU ren
 [cauliflowermossgrape/idrive7-apps](https://github.com/cauliflowermossgrape/idrive7-apps). Its README explains the
 platform, the renderer and every install option in depth.
 
-## You need
+## Install from the MGU Store
+
+With the [MGU Store](https://github.com/robertnisipeanu/mgu-store) on the head unit, nothing is built on a computer.
+The car builds elDrive from this repository with BMW's SDK taken from its own apps, so no SDK is ever copied around.
+
+1. In the Store, add a source: the GitHub repository **`beele/eldrive`**, on the branch **`main`** (or on **Tags**
+   once the repository has a version tag such as `v1.0.0`: then the car only sees tagged versions, not every commit).
+2. elDrive shows up with its icon. **Install** it. The Store first installs what it needs: its Python and deploy
+   tools, the **GPU renderer** (`idrive7-renderd`) and the **controller gate** (`mgu-inputgate`, which loads into the
+   HMI at the next head-unit start, behind a boot guard that leaves it out if the HMI fails to come up with it twice).
+   A renderer or gate already installed from the upstream `idrive7-apps` source is used as it is.
+3. The car runs `kit/tools/build.py eldrive` (no network, under a second on a PC) and installs the package. The tile
+   appears under **Apps**.
+
+On the `main` branch, every new commit is offered to the car as an update.
+
+## Build and install from a computer
+
+### You need
 
 - A BMW with the **MGU head unit** (iDrive 7) and **root SSH access** to it. This repository doesn't provide that.
 - **BMW's app SDK (`oap-sdk`)**, extracted from your own unit (below). It is BMW's code: never commit it.
 - **Python 3** and **Node.js 14+** on your computer.
 
-## Build and install
+### Steps
 
 ```sh
 # 1. the SDK, from the x_call app in your unit's firmware (unpacked outside the repository: it is BMW's code)
@@ -46,9 +64,6 @@ appears under **Apps** after 1-2 minutes.
 - `install` adds or updates only the apps in this kit, so apps already installed from the upstream kit (e.g.
   eDrive) stay. elDrive has its own id and data, so it runs next to eDrive.
 - `deploy/push-to-car.sh restore` puts the unit back to stock, **removing every custom app**.
-
-`mgu-repo.json` is the manifest the [MGU Store](https://github.com/robertnisipeanu/mgu-store) reads to build and
-install the apps of a repository, so you can also install from this repository through the Store.
 
 ## Develop
 
