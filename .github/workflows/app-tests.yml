@@ -1,0 +1,26 @@
+name: App tests
+
+# The kit runtime and elDrive's synthetic checks, and an offline preview build (no SDK, renderer or car needed;
+# an installable build needs BMW's SDK, which is never in git).
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: node kit/tools/test_runtime.js
+      - run: node kit/tools/test_dids.js
+      - run: node kit/tools/test_eldrive.js
+      - run: python3 kit/tools/build.py --preview-only eldrive

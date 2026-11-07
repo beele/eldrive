@@ -1,0 +1,35 @@
+# BMW's SDK - extract it from your own head unit (kit/tools/extract_sdk.js), never commit it
+oap-sdk
+# BMW's x_call app the SDK is extracted from (its package and unpacked folder), also BMW's code
+x_call/
+x_call@*
+# the unit's SOME/IP catalog, if copied from your unit
+reference/
+# build output - every .mgu / .tgz contains BMW's SDK, so don't publish these either
+dist/
+*.mgu
+*.tgz
+# keys / local stuff
+*.pem
+*.key
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+/preview/
+.claude/
+kit/renderd/build/
+kit/renderd/protocol/*-protocol.c
+kit/renderd/protocol/*-client-protocol.h
+kit/tools/.font-cache/
+# local vehicle diagnostics (captures, logs, backups from the car)
+/work/
+/captures/
+/backups/
+*.pcap
+*.pcapng
+*.dlt
+*.log
+*.core
+/kit/renderd/core
