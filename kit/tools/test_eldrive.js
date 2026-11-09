@@ -40,10 +40,14 @@ class FakeDiag extends EventEmitter { constructor() { super(); this.available = 
 // the battery unit's values by name; other units (the 48 V battery, the converter, the engine unit's 12 V
 // sensor) answer `replies` by '<ecu>:<DID>' (the data after the DID, hex), through the real reader
 let replies = {};
+// waitNoReply: a unit that doesn't answer takes its whole timeout (the clock moves on by it), as on the car;
+// asked: the units asked, in order
+let waitNoReply = false, asked = [];
 const RealReader = require(path.join(KIT, 'dids')).DidReader;
 class FakeReader extends RealReader {
     constructor() {
-        super({ physical: async (ecu, sid, req) => {
+        super({ physical: async (ecu, sid, req, timeoutMs) => {
+            asked.push(ecu);
             const did = ((req[0] << 8) | req[1]).toString(16).toUpperCase().padStart(4, '0'), r = replies[ecu + ':' + did];
             // (a reply starting with 7F is a refusal as it comes: '7F 22 31')
             if (r) return /^7F /.test(r) ? r.split(' ').map((x) => parseInt(x, 16)) : [0x62, req[0], req[1]].concat(r.split(' ').map((x) => parseInt(x, 16)));
@@ -51,6 +55,7 @@ class FakeReader extends RealReader {
             if (ecu === 7 && values.soc !== undefined) {
                 return did === 'DDBC' && typeof values.soc === 'number' ? [0x62, req[0], req[1], (values.soc * 10) >> 8, (values.soc * 10) & 0xFF] : [0x7F, sid, 0x31];
             }
+            if (waitNoReply) now += timeoutMs || 4000;
             return null;
         } }, { ecu: 7 });
         reader = this;
@@ -77,7 +82,9 @@ Module._load = function (req, parent, isMain) {
 
 const dirs = [];
 const tmp = (name) => { const d = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'edrive-' + name + '-')); dirs.push(d); return d; };
-const quiet = { info() {}, warn() {}, error() {} };
+// (warnings kept: how long a read held the diagnostic link, main.js pump)
+const warnings = [];
+const quiet = { info() {}, warn(m) { warnings.push(String(m)); }, error() {} };
 function context(dir, set) {
     const defaults = {};
     SPEC.settings.forEach((s) => { defaults[s.key] = s.default; });
@@ -506,6 +513,26 @@ const checks = [
         assert(t.includes('down to 10 %'), t.join(' | '));
         assert.strictEqual(big && big.str, String(Math.round(40 * 0.74 / 0.195)), 'the 40 % above 10 %: ' + (big && big.str));
         replies = {};
+    }],
+    ['B10. a 12 V read that nobody answers never holds the link long (the live power reads between)', async () => {
+        // an iX3 whose battery unit refuses F442 and has no engine or gearbox unit: before, all nine 12 V candidates
+        // went in one turn on the link (27 s of timeouts), the live power waited behind it and blanked after 15 s
+        const held = () => warnings.map((w) => /^link held (\d+) ms by (.*)$/.exec(w)).filter(Boolean).map((m) => [+m[1], m[2]]);
+        replies = Object.assign(IX3(62, 45.9, 74), { '7:F442': '7F 22 31' });
+        waitNoReply = true; warnings.length = 0; asked = [];
+        const b = await boot(tmp('v12'), {}, { demo: 'off', hybrid: 'bev' });
+        for (let i = 0; i < 3; i++) { now += 20000; await b.read(); }
+        waitNoReply = false;
+        const longest = Math.max.apply(null, [0].concat(held().map((h) => h[0])));
+        assert(longest <= 4000, 'a turn held the link ' + longest + ' ms: ' + JSON.stringify(held()));
+        [0x12, 0x13, 0x18].forEach((u) => assert(asked.indexOf(u) < 0, 'unit 0x' + u.toString(16) + ' asked on a fully electric car'));
+        assert(asked.indexOf(0x40) >= 0 && asked.indexOf(0x1A) >= 0, 'the fully electric candidates are still asked');
+        void b;
+        // a plug-in hybrid still asks its engine unit first after the battery unit (as configured)
+        replies = {}; asked = [];
+        const p = await boot(tmp('v12-phev'), { soc: 55 }, { demo: 'off', hybrid: 'yes' });
+        now += 20000; await p.read();
+        assert(asked.indexOf(0x12) >= 0, 'the engine unit asked on a plug-in hybrid: ' + asked.join(','));
     }],
     ['B9. a plug-in hybrid on Auto stays one (its battery unit refuses E5C7)', async () => {
         const dir = tmp('phev-auto');

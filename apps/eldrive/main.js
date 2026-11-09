@@ -95,6 +95,7 @@ const RESERVE = 8;               // engine-start charge (%) until two engine sta
 const HOLD_TOP = 11;
 const ASLEEP_MS = 10 * 60000;     // a gap this long between charge readings: the car was off meanwhile
 const REST_RISE = 0.5;            // % above the lowest charge since standing: charging (also in steps under 0.3 %)
+const NO_ENGINE = [0x12, 0x13, 0x18];     // engine units (DME, DME 2) and the gearbox unit (EGS): not on a fully electric car
 
 /**
  * Range of a full battery by outside temperature, for a car doing 50 km at 20 °C:
@@ -454,7 +455,20 @@ mgu.run({
             if (urgent) queue.unshift(j); else queue.push(j);
             pump();
         });
-        const readValue = (key) => exclusive(() => reader.value(key, cfg[key]));
+        /* A value's candidates, starting with the one that answered last (kit/dids.js value()), each in a turn of its own
+         * on the link: candidates that don't answer each wait out their timeout, and all of them in one turn (nine for the
+         * 12 V, 27 s where none answers) kept the live power reads behind them so long that the power went blank. A fully
+         * electric car has no engine or gearbox unit (NO_ENGINE): those candidates are not asked there. */
+        async function readValue(key) {
+            const list = cfg[key] || [], start = pick[key] || 0, bev = isBev();
+            for (let k = 0; k < list.length; k++) {
+                const i = (start + k) % list.length, c = list[i], ecu = c.ecu == null ? cfg.ecu : c.ecu;
+                if (bev && NO_ENGINE.indexOf(ecu) >= 0) continue;
+                const v = await exclusive(() => reader.value(key, [c]), false, key + ' ' + DidReader.label(c) + ' at 0x' + hex(ecu));
+                if (v !== null) { pick[key] = i; return v; }
+            }
+            return null;
+        }
 
         /* ---------- last charge ----------
          * A charge = the charge level rising by >= chargeMinPct while the car stands still

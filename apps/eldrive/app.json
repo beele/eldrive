@@ -2,7 +2,7 @@
   "id": "eldrive",
   "title": "elDrive",
   "description": "eDrive with fully electric cars (BEV, e.g. the iX3): real range, live battery power, cells and climate power, HV battery health and energy, last charge, charge log, 12 V battery voltage and a home-screen widget; plug-in hybrids and 48 V mild hybrids as in eDrive",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "vendor": "custom",
   "loggingId": "OAA3",
   "iconGlyph": "battery",
