@@ -354,6 +354,12 @@ mgu.run({
             return G.isNum(d.soc) ? holdsKwh(d) * d.soc / 100 : null;
         };
 
+        // connect in the background: the screen must not wait for the diagnostic link. Set up before the signals below,
+        // so the link's own set-up doesn't wait behind theirs (kit/signals.js runs one native call at a time)
+        const diag = new Diag(ctx.signals, log);
+        diag.quiet = true;                     // polled every few seconds: keep the log file small
+        diag.init();
+
         ctx.signals.watch('de.bmw.infrastructure.EnvironmentalInformation', '1', {
             ExteriorTemperature: (v) => { const a = sc('ambient', v.temperatureExterior); if (a !== null) live.ambient = a; },
         }, log).then((s) => log.info('ambient ' + (s.error ? 'error: ' + s.error : 'subscribed')));
@@ -424,16 +430,17 @@ mgu.run({
             },
         }, log).then((s) => log.info('HV voltage ' + (s.error ? 'error: ' + s.error : 'subscribed')));
 
-        // connect in the background: the screen must not wait for the diagnostic link
-        const diag = new Diag(ctx.signals, log);
-        diag.quiet = true;                     // polled every few seconds: keep the log file small
-        diag.init();
         const demo = new Demo(() => kwhPerPct() * 100);
         const usingDemo = () => settings.get('demo') === 'on' || (settings.get('demo') === 'auto' && !diag.available && !live.socT);
 
         /* ---------- UDS reads (candidates per value, see kit/dids.js) ---------- */
         const reader = new DidReader(diag, { ecu: cfg.ecu });
         const raws = reader.raws, pick = reader.pick;      // for the Diagnostics page
+        // the candidate that answered each value, kept across starts (battery.json): the next start asks that one first,
+        // not the ones before it this car doesn't answer (each can wait out its timeout)
+        // (in battery.json once one has answered: a start that reads nothing writes nothing)
+        Object.assign(pick, st.pick || {});
+        Object.defineProperty(st, 'pick', { enumerable: true, configurable: true, get: () => (Object.keys(pick).length ? pick : undefined) });
         // one request at a time on the diagnostic link: a queue rather than a plain chain, so a live
         // power read (urgent) goes ahead of the reads that wait
         const queue = [];
@@ -698,6 +705,24 @@ mgu.run({
             busy = true;
             try {
                 if (diag.available) {
+                    // the charge first, the 12 V after it: the pages wait for the charge, and 12 V candidates that don't
+                    // answer each wait out their timeout (3 x 1.5 s on a fully electric car before the first charge)
+                    // without a hybrid system only re-check the battery unit every 5 minutes
+                    const noHy = st.noHybrid && settings.get('hybrid') !== 'yes';
+                    const hvDue = !noHy || forceSoh || Date.now() - lastSocTry > 300000;
+                    if (hvDue) {
+                        lastSocTry = Date.now();
+                        const soc = await readValue('soc'), socT = Date.now();
+                        // shown at once (the kWh below can wait behind the live pages' reads)
+                        if (soc !== null) { live.soc = soc; live.socT = socT; }
+                        // fully electric (or not known yet on Auto, with a battery unit there): the battery's kWh, before the
+                        // charge reading is used (its kWh per % and the range model's limits)
+                        const onAuto = settings.get('hybrid') === 'auto';
+                        if ((cfg.energy || []).length && (isBev() || (onAuto && st.bev === undefined && (st.hybrid || soc !== null)))) await readEnergy();
+                        if (soc !== null) onSoc(soc, socT);
+                        // (saved after the reading: every save holds the last charge read, see onSoc)
+                        if (energySave) { energySave = false; save(); }
+                    }
                     // 12 V: every poll; after 3 failures in a row only every 5 minutes
                     let v12 = null;
                     if (v12Fail < 3 || forceSoh || Date.now() - v12Try > 300000) {
@@ -705,18 +730,7 @@ mgu.run({
                         v12 = await readValue('v12');
                         if (v12 !== null) { live.v12 = v12; live.v12T = Date.now(); v12Fail = 0; } else v12Fail++;
                     }
-                    // without a hybrid system only re-check the battery unit every 5 minutes
-                    const noHy = st.noHybrid && settings.get('hybrid') !== 'yes';
-                    if (!noHy || forceSoh || Date.now() - lastSocTry > 300000) {
-                        lastSocTry = Date.now();
-                        const soc = await readValue('soc');
-                        // fully electric (or not known yet on Auto, with a battery unit there): the battery's kWh, before the
-                        // charge reading is used (its kWh per % and the range model's limits)
-                        const onAuto = settings.get('hybrid') === 'auto';
-                        if ((cfg.energy || []).length && (isBev() || (onAuto && st.bev === undefined && (st.hybrid || soc !== null)))) await readEnergy();
-                        if (soc !== null) { live.soc = soc; live.socT = Date.now(); onSoc(soc, live.socT); }
-                        // (saved after the reading: every save holds the last charge read, see onSoc)
-                        if (energySave) { energySave = false; save(); }
+                    if (hvDue) {
                         detectHybrid(v12 !== null);
                         // health changes over months: read it once every "sohDays" (kept across restarts),
                         // on "Read now", and after a failed read at most once an hour. A fully electric car whose battery

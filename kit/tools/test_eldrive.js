@@ -42,13 +42,14 @@ class FakeDiag extends EventEmitter { constructor() { super(); this.available = 
 let replies = {};
 // waitNoReply: a unit that doesn't answer takes its whole timeout (the clock moves on by it), as on the car;
 // asked: the units asked, in order
-let waitNoReply = false, asked = [];
+let waitNoReply = false, asked = [], askedDid = [];
 const RealReader = require(path.join(KIT, 'dids')).DidReader;
 class FakeReader extends RealReader {
     constructor() {
         super({ physical: async (ecu, sid, req, timeoutMs) => {
             asked.push(ecu);
             const did = ((req[0] << 8) | req[1]).toString(16).toUpperCase().padStart(4, '0'), r = replies[ecu + ':' + did];
+            askedDid.push(ecu + ':' + did + '@' + now);
             // (a reply starting with 7F is a refusal as it comes: '7F 22 31')
             if (r) return /^7F /.test(r) ? r.split(' ').map((x) => parseInt(x, 16)) : [0x62, req[0], req[1]].concat(r.split(' ').map((x) => parseInt(x, 16)));
             // the battery unit (0x07) is there while the test gives it a charge value (null: no reading now)
@@ -135,8 +136,8 @@ async function boot(dir, vals, set) {
 const state = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'battery.json'), 'utf8'));
 
 /** eDrive Live (live.js) on its own, with eDrive's live values L; the battery unit answers `vals` by DID. extra: more of
- *  what main.js hands it (isBev, fullKwh). */
-function startLive(dir, L, vals, config, extra) {
+ *  what main.js hands it (isBev, fullKwh, or a reader of its own). set: settings; widget: the home-screen widget's stub. */
+function startLive(dir, L, vals, config, extra, set, widget) {
     delete require.cache[LIVE];
     timers = [];
     const raws = {};
@@ -149,8 +150,9 @@ function startLive(dir, L, vals, config, extra) {
             return v;
         },
     };
-    const ctx = context(dir);
-    ctx.spec = { config: Object.assign({ battery: { fast: { hvV: [{ did: 'DD68', fields: { v: {} } }], hvI: [{ did: 'DD69', fields: { a: {} } }] }, slow: {} } }, config || {}) };
+    const ctx = context(dir, set);
+    if (widget) ctx.widget = widget;
+    ctx.spec = { startWidget: SPEC.startWidget, config: Object.assign({ battery: { fast: { hvV: [{ did: 'DD68', fields: { v: {} } }], hvI: [{ did: 'DD69', fields: { a: {} } }] }, slow: {} } }, config || {}) };
     const exclusive = (fn) => fn();
     return require(LIVE)(ctx, Object.assign({ diag: { available: true, on() {}, physical: async () => null }, reader, exclusive, live: L, page: () => 'main', climateKw: () => 0 }, extra || {}));
 }
@@ -166,6 +168,18 @@ const IX3 = (soc, stored, cap) => ({
     '7:DD68': '7F 22 31', '7:DD69': '7F 22 31', '7:6335': '7F 22 31', '7:DDBF': '7F 22 31', '7:DD7B': '7F 22 31',
 });
 const power = () => fire((ms) => ms === 60 || ms === 2000);
+/** The real UDS reader for live.js, the battery unit answering `hexByDid` (the data after the DID, or a refusal '7F 22 31'). */
+const udsReader = (hexByDid) => new RealReader({ physical: async (ecu, sid, req) => {
+    const did = ((req[0] << 8) | req[1]).toString(16).toUpperCase().padStart(4, '0'), r = hexByDid[did];
+    if (!r) return null;
+    return /^7F /.test(r) ? r.split(' ').map((x) => parseInt(x, 16)) : [0x62, req[0], req[1]].concat(r.split(' ').map((x) => parseInt(x, 16)));
+} }, { ecu: 7 });
+/** The Battery page drawn: { d: the data it showed, texts: every text drawn }. */
+const batteryPage = (lv) => {
+    const cv = new Canvas(1600, 520), texts = [], text = cv.text.bind(cv);
+    cv.text = (s, x, y, size, c, o) => { texts.push(String(s)); return text(s, x, y, size, c, o); };
+    return { d: lv.draw('battery', cv, themes.theme('m_tricolour')), texts };
+};
 const liveState = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'live.json'), 'utf8')); } catch (e) { return {}; } };
 const L0 = () => ({ speed: 0, rpm: 0, rpmT: 0, climate: false, seats: {}, wheel: false, standSince: now - 60000, blower: 0, blowerTop: 8, ambient: 10 });
 
@@ -540,6 +554,84 @@ const checks = [
         for (let i = 0; i < 3; i++) { now += 20000; await b.read(); }
         assert.strictEqual(state(dir).bev, false, JSON.stringify(state(dir)));
         assert((await b.draw()).includes('engine starts at 11 %'));
+    }],
+    ['B11. the first charge reading comes before the 12 V (whose candidates may each wait out their timeout)', async () => {
+        // an iX3 where no unit answers F442: before, the charge waited for three 1.5 s timeouts at every start
+        const dir = tmp('first');
+        replies = IX3(62, 45.9, 74);
+        waitNoReply = true;
+        const b = await boot(dir, {}, { demo: 'off', hybrid: 'bev' });
+        const t0 = now; askedDid = [];
+        await b.read();
+        waitNoReply = false;
+        const s = state(dir);
+        assert.strictEqual(s.lastSoc, 62, JSON.stringify(s));
+        assert(s.lastSocT - t0 < 1000, 'the charge read ' + (s.lastSocT - t0) + ' ms after the link came up: ' + askedDid.map((a) => a.replace(/@(\d+)/, (m, x) => '@' + (x - t0))).join(' '));
+        assert(now - t0 >= 4500, 'the 12 V candidates still asked after it');
+        replies = {};
+    }],
+    ['B12. the identifier that answered is asked first at the next start', async () => {
+        const dir = tmp('pick');
+        replies = Object.assign(IX3(62, 45.9, 74), { '64:F442': hex4(12600) });      // the BDC answers the 12 V
+        let b = await boot(dir, {}, { demo: 'off', hybrid: 'bev' });
+        now += 20000; await b.read(); b.exit();
+        askedDid = [];
+        b = await boot(dir, {}, { demo: 'off', hybrid: 'bev' });
+        now += 20000; await b.read();
+        const first = (re) => askedDid.find((a) => re.test(a)) || '';
+        assert(/^7:E5CE@/.test(first(/^7:(DDBC|E5CE)@/)), 'the charge from E5CE first: ' + askedDid.join(' '));
+        assert(/^64:F442@/.test(first(/:F442@/)), 'the 12 V from the BDC first: ' + askedDid.join(' '));
+        // a start that reads nothing still writes nothing (1b): the picks are only kept once one answered
+        assert(state(dir).pick && state(dir).pick.soc === 1, JSON.stringify(state(dir).pick));
+        replies = {};
+    }],
+    ['B13. Battery page: the lowest and highest cell\'s charge (iX3, E5CE); every cell from E554 without its padding', async () => {
+        const bat = SPEC.config.battery, config = { battery: { fast: bat.fast, slow: { soc: bat.slow.soc, cellV: bat.slow.cellV }, powerSign: bat.powerSign } };
+        // as captured on a 2021 iX3: 24.22 %, cells 23.84-24.69 %; every cell voltage identifier refused
+        const ix3 = { DDBC: '00 00 00 00 00 00', E5CE: '09 76 09 50 09 A5', E554: '7F 22 31', E553: '7F 22 31', DFA5: '7F 22 31', DDBF: '7F 22 31' };
+        let lv = startLive(tmp('cells'), L0(), {}, config, { isBev: () => true, reader: udsReader(ix3) });
+        batteryPage(lv); await fire((ms) => ms === 5000);
+        let r = batteryPage(lv);
+        const near = (a, b) => Math.abs(a - b) < 1e-9;
+        assert(near(r.d.soc, 24.22) && r.d.cellSoc && near(r.d.cellSoc.min, 23.84) && near(r.d.cellSoc.max, 24.69), JSON.stringify([r.d.soc, r.d.cellSoc]));
+        ['23.84 %', '24.69 %', '0.85 %', 'Cell voltages: no reading'].forEach((s) => assert(r.texts.includes(s), s + ' in ' + r.texts.join(' | ')));
+        assert(!r.texts.includes('no reading yet'), 'not the empty panel');
+        // a fifth-generation battery unit with E554: 94 cells in 112 slots, the rest 7FFF
+        const slots = [];
+        for (let i = 0; i < 112; i++) slots.push(i < 94 ? hex4(3700 + (i % 7)) : '7F FF');
+        lv = startLive(tmp('cells94'), L0(), {}, config, { isBev: () => true, reader: udsReader(Object.assign({}, ix3, { E554: slots.join(' ') })) });
+        batteryPage(lv); await fire((ms) => ms === 5000);
+        r = batteryPage(lv);
+        assert(r.d.cellV && r.d.cellV.cells.length === 94 && r.d.cellV.cells.every((v) => v !== null), JSON.stringify(r.d.cellV && r.d.cellV.cells.length));
+        assert(r.texts.includes('3.700 V') && r.texts.includes('3.706 V') && r.texts.includes('6 mV'), r.texts.join(' | '));
+    }],
+    ['B14. the home-screen widget keeps clear of the HMI\'s fade (Medium); Fill the widget draws as 1.0', async () => {
+        const { ScaledCanvas } = require(path.join(KIT, 'canvas'));
+        const drawn = [], text = ScaledCanvas.prototype.text;
+        ScaledCanvas.prototype.text = function (s, x, y, size, c, o) {
+            const wd = text.call(this, s, x, y, size, c, o);
+            drawn.push({ x, y, size, wd, align: o && o.align });
+            return wd;
+        };
+        const box = {};
+        try {
+            for (const fit of ['large', 'medium', 'small']) {
+                let draw = null;
+                startLive(tmp('w-' + fit), L0(), {}, null, {}, { widgetFit: fit, demo: 'on' },
+                    { loop: (fps, fn) => { draw = fn; }, onChange() {}, active: () => true, set() {} });
+                drawn.length = 0;
+                draw(null);
+                const xs = drawn.map((d) => (d.align === 'right' ? [d.x - d.wd, d.x] : d.align === 'center' ? [d.x - d.wd / 2, d.x + d.wd / 2] : [d.x, d.x + d.wd]));
+                box[fit] = { l: Math.min.apply(null, xs.map((a) => a[0])), r: Math.max.apply(null, xs.map((a) => a[1])),
+                    t: Math.min.apply(null, drawn.map((d) => d.y - d.size)), b: Math.max.apply(null, drawn.map((d) => d.y)) };
+            }
+        } finally { ScaledCanvas.prototype.text = text; }
+        // 384 x 256: 1.0 kept 9 % clear at the sides (35 .. 349) and its lines from 44 to 210
+        assert(box.large.l === 35 && box.large.r === 349 && box.large.t === 44 && box.large.b === 210, JSON.stringify(box.large));
+        // Medium: 15 % at the sides, 21 % at the top, 19 % at the bottom; Small further in
+        const inside = (b, l, t, r, bo) => b.l >= 384 * l - 0.5 && b.r <= 384 * (1 - r) + 0.5 && b.t >= 256 * t - 0.5 && b.b <= 256 * (1 - bo) + 0.5;
+        assert(inside(box.medium, 0.15, 0.21, 0.15, 0.19), JSON.stringify(box.medium));
+        assert(inside(box.small, 0.20, 0.26, 0.20, 0.22), JSON.stringify(box.small));
     }],
 ];
 

@@ -23,13 +23,15 @@ app remembers it. You can also set **Drive system: Fully electric (BEV)** direct
 ## What is confirmed
 
 From the [OBDb iX3 captures](https://github.com/OBDb/BMW-iX3) (2021, 2022 and 2023 cars, battery unit `0x07`):
-`E5CE` charge, `E5C7` stored and usable kWh, `DDC0` cell temperatures, `E561` current, `DDBC` zero bytes. `DD68`,
-`DD69`, `DDBF` and `6335` are refused.
+`E5CE` charge with the lowest and highest cell's charge after it, `E5C7` stored and usable kWh, `DDC0` cell
+temperatures, `E561` current, `DDBC` zero bytes. `DD68`, `DD69`, `DDBF`, `DFA0` and `6335` are refused.
 
 **Not yet confirmed on an iX3:**
 - `E54D` pack voltage. It is confirmed on the iX (same battery-unit generation).
 - The 12 V reading. The app tries `F442` on the battery unit, the BDC (`0x40`) and the EME (`0x1A`).
-- Cell voltages: they will probably show "no reading".
+- Cell voltages: `E554` (every cell) and `E553` (lowest and highest), confirmed on the
+  [iX1](https://github.com/OBDb/BMW-iX1), are tried first. Without them the Battery page's Cells panel shows the lowest
+  and highest cell's charge from `E5CE`, and "Cell voltages: no reading".
 - Coolant `DD6C`, current limits `DD7D`, and the climate unit probes.
 - That the car's SOME/IP signals (speed, climate, seat heating) arrive as on the X5.
 
@@ -45,6 +47,8 @@ From the [OBDb iX3 captures](https://github.com/OBDb/BMW-iX3) (2021, 2022 and 20
 5. After ~10 km: the Range page should say "learned from … km". Compare with the car's own range.
 6. Photograph anything that reads `n/a` or looks wrong. The identifiers are in `config.battery` in `app.json`.
    The **Scan** page (battery unit) now also covers `E500-E5FF`.
+7. Home-screen widget: the HMI fades the picture towards its edges. **Home-screen widget: picture** (Settings) keeps
+   it clear of the fade: *Medium* by default, *Small* if the edges still look faded, *Fill the widget* as in 1.0.
 
 ## Safety
 
